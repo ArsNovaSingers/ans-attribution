@@ -3,7 +3,7 @@
  * Plugin Name: Ars Nova Attribution
  * Plugin URI:  https://github.com/ArsNovaSingers/ans-attribution
  * Description: Campaign attribution for print mailers. Captures a campaign ref off the landing URL, auto-applies that campaign's coupon, refuses to stack it on a Flex Pass / Season Package, and stamps every resulting order so the mailer's return is answerable years later without depending on GA4.
- * Version:     1.0.0
+ * Version:     1.1.0
  * Author:      Ars Nova (Jonathan Raabe) + Claude
  * Requires PHP: 7.4
  * Text Domain: ans-attribution
@@ -15,7 +15,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ANS_ATTR_VERSION', '1.0.0' );
+define( 'ANS_ATTR_VERSION', '1.1.0' );
+define( 'ANS_ATTR_SCANS_OPTION', 'ans_attr_scans' );
 define( 'ANS_ATTR_COOKIE', 'ans_attr' );
 define( 'ANS_ATTR_TTL', 60 * DAY_IN_SECONDS );
 
@@ -34,7 +35,9 @@ function ans_attr_campaigns() {
 			'label'       => 'Rivers & Streams postcard mailer (Oct 2026)',
 			'coupon'      => 'RIVERS10',
 			'short_path'  => '/go/rs',
+			'destination' => '/this-season/rivers-and-streams/',
 			'utm_content' => 'rivers-streams-mailer-2026',
+			'utm_campaign' => 'confluence-2627',
 			'pieces'      => 650,
 			'mail_house'  => 'Allegra',
 		),
@@ -107,10 +110,22 @@ function ans_attr_capture() {
 		return;
 	}
 
+	ans_attr_set_cookie( $campaign['key'], $campaign['coupon'] );
+}
+add_action( 'init', 'ans_attr_capture', 5 );
+
+/**
+ * Write the attribution cookie.
+ *
+ * @param string $campaign_key Campaign key.
+ * @param string $coupon       Coupon code.
+ * @return void
+ */
+function ans_attr_set_cookie( $campaign_key, $coupon ) {
 	$payload = wp_json_encode(
 		array(
-			'campaign' => $campaign['key'],
-			'coupon'   => $campaign['coupon'],
+			'campaign' => $campaign_key,
+			'coupon'   => $coupon,
 			'ts'       => time(),
 		)
 	);
@@ -129,7 +144,6 @@ function ans_attr_capture() {
 
 	$_COOKIE[ ANS_ATTR_COOKIE ] = $payload;
 }
-add_action( 'init', 'ans_attr_capture', 5 );
 
 /**
  * The stored capture, if any.
@@ -379,9 +393,19 @@ add_action( 'woocommerce_store_api_checkout_update_order_from_request', 'ans_att
  * @param string $short_path Redirection source path.
  * @return int|null Null when Redirection is not installed.
  */
-function ans_attr_scan_count( $short_path ) {
+function ans_attr_scan_count( $short_path, $campaign_key = '' ) {
 	global $wpdb;
 
+	// Our own counter is authoritative from v1.1.0 on — we serve the hop.
+	if ( '' !== $campaign_key ) {
+		$counts = get_option( ANS_ATTR_SCANS_OPTION, array() );
+
+		if ( is_array( $counts ) && isset( $counts[ $campaign_key ] ) ) {
+			return (int) $counts[ $campaign_key ];
+		}
+	}
+
+	// Fallback: a Redirection rule left over from v1.0.0.
 	$table = $wpdb->prefix . 'redirection_items';
 
 	// phpcs:disable WordPress.DB.DirectDatabaseQuery
@@ -446,7 +470,7 @@ function ans_attr_report( $request ) {
 		}
 
 		$pieces = isset( $campaign['pieces'] ) ? (int) $campaign['pieces'] : 0;
-		$scans  = ans_attr_scan_count( $campaign['short_path'] );
+		$scans  = ans_attr_scan_count( $campaign['short_path'], $key );
 
 		$out[ $key ] = array(
 			'label'              => $campaign['label'],
@@ -505,3 +529,89 @@ function ans_attr_rest_routes() {
 	);
 }
 add_action( 'rest_api_init', 'ans_attr_rest_routes' );
+
+/**
+ * Serve the short link ourselves, and set the cookie HERE.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS. Measured on LIVE 2026-09-09, and it would have been a silent
+ * total failure in production.
+ *
+ * v1.0.0 let the Redirection plugin 302 to the concert page and set the cookie
+ * when that page loaded. But Kinsta's edge cache serves the concert page as a
+ * HIT (`x-kinsta-cache: HIT`) — utm_* parameters do not bust it. On a cache hit
+ * PHP never runs, so `setcookie()` never fires. Every patron scanning the
+ * postcard would have landed on a perfectly normal-looking page with no cookie,
+ * no auto-applied coupon and no order stamp, and nothing anywhere would have
+ * reported an error. The bug only showed up because a test request happened to
+ * carry a cache-busting parameter.
+ *
+ * A redirect is uncacheable and always executes PHP, so setting the cookie at
+ * the hop instead of at the destination removes the failure mode rather than
+ * working around it. The landing page stays cached and fast.
+ *
+ * Priority 1 so this runs before the Redirection plugin can claim the URL.
+ * ---------------------------------------------------------------------------
+ *
+ * @return void
+ */
+function ans_attr_handle_short_link() {
+	if ( is_admin() || wp_doing_cron() || ( defined( 'DOING_AJAX' ) && DOING_AJAX ) ) {
+		return;
+	}
+
+	$uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+
+	if ( '' === $uri ) {
+		return;
+	}
+
+	$path = '/' . trim( (string) strtok( $uri, '?' ), '/' );
+
+	foreach ( ans_attr_campaigns() as $key => $campaign ) {
+		if ( empty( $campaign['short_path'] ) || empty( $campaign['destination'] ) ) {
+			continue;
+		}
+
+		if ( $path !== '/' . trim( $campaign['short_path'], '/' ) ) {
+			continue;
+		}
+
+		ans_attr_record_scan( $key );
+		ans_attr_set_cookie( $key, $campaign['coupon'] );
+
+		$destination = add_query_arg(
+			array(
+				'utm_source'   => 'qr',
+				'utm_medium'   => 'print',
+				'utm_campaign' => isset( $campaign['utm_campaign'] ) ? $campaign['utm_campaign'] : 'confluence-2627',
+				'utm_content'  => $campaign['utm_content'],
+				'ansref'       => $campaign['coupon'],
+			),
+			home_url( $campaign['destination'] )
+		);
+
+		nocache_headers();
+		wp_safe_redirect( $destination, 302 );
+		exit;
+	}
+}
+add_action( 'init', 'ans_attr_handle_short_link', 1 );
+
+/**
+ * Increment the scan counter for a campaign.
+ *
+ * @param string $campaign_key Campaign key.
+ * @return void
+ */
+function ans_attr_record_scan( $campaign_key ) {
+	$counts = get_option( ANS_ATTR_SCANS_OPTION, array() );
+
+	if ( ! is_array( $counts ) ) {
+		$counts = array();
+	}
+
+	$counts[ $campaign_key ] = isset( $counts[ $campaign_key ] ) ? (int) $counts[ $campaign_key ] + 1 : 1;
+
+	update_option( ANS_ATTR_SCANS_OPTION, $counts, false );
+}
