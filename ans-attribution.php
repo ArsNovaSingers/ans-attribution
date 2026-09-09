@@ -3,7 +3,7 @@
  * Plugin Name: Ars Nova Attribution
  * Plugin URI:  https://github.com/ArsNovaSingers/ans-attribution
  * Description: Campaign attribution for print mailers. Captures a campaign ref off the landing URL, auto-applies that campaign's coupon, refuses to stack it on a Flex Pass / Season Package, and stamps every resulting order so the mailer's return is answerable years later without depending on GA4.
- * Version:     1.1.0
+ * Version:     1.2.0
  * Author:      Ars Nova (Jonathan Raabe) + Claude
  * Requires PHP: 7.4
  * Text Domain: ans-attribution
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ANS_ATTR_VERSION', '1.1.0' );
+define( 'ANS_ATTR_VERSION', '1.2.0' );
 define( 'ANS_ATTR_SCANS_OPTION', 'ans_attr_scans' );
 define( 'ANS_ATTR_COOKIE', 'ans_attr' );
 define( 'ANS_ATTR_TTL', 60 * DAY_IN_SECONDS );
@@ -35,6 +35,10 @@ function ans_attr_campaigns() {
 			'label'       => 'Rivers & Streams postcard mailer (Oct 2026)',
 			'coupon'      => 'RIVERS10',
 			'short_path'  => '/go/rs',
+			// The printed QR carries ?m=1. Kinsta's edge serves a bare /go/rs
+			// from cache and strips Set-Cookie; any unrecognised query param
+			// forces BYPASS. Measured 3/3 both ways on LIVE, 2026-09-09.
+			'qr_query'    => 'm=1',
 			'destination' => '/this-season/rivers-and-streams/',
 			'utm_content' => 'rivers-streams-mailer-2026',
 			'utm_campaign' => 'confluence-2627',
@@ -476,6 +480,7 @@ function ans_attr_report( $request ) {
 			'label'              => $campaign['label'],
 			'coupon'             => $campaign['coupon'],
 			'short_path'         => $campaign['short_path'],
+			'qr_url'             => home_url( $campaign['short_path'] ) . ( empty( $campaign['qr_query'] ) ? '' : '?' . $campaign['qr_query'] ),
 			'pieces_mailed'      => $pieces,
 			'scans'              => $scans,
 			'scan_rate_pct'      => ( $pieces > 0 && null !== $scans ) ? round( $scans / $pieces * 100, 2 ) : null,
@@ -615,3 +620,68 @@ function ans_attr_record_scan( $campaign_key ) {
 
 	update_option( ANS_ATTR_SCANS_OPTION, $counts, false );
 }
+
+/**
+ * Client-side belt-and-braces for the cookie.
+ *
+ * ---------------------------------------------------------------------------
+ * The PHP hop (above) is the primary mechanism and it works — but only on a
+ * cache MISS. Measured on LIVE 2026-09-09: when Kinsta's edge serves /go/rs
+ * from cache it STRIPS the Set-Cookie header entirely. A bare /go/rs was HIT
+ * 3/3; /go/rs with any unrecognised query parameter was BYPASS 3/3, cookie
+ * present every time. That is why the printed QR carries `?m=1`.
+ *
+ * Relying on that alone would make attribution depend on an undocumented host
+ * caching rule that could change without notice, and the failure would be
+ * silent — which is exactly how v1.0.0 failed. So: the landing URL always
+ * carries `ansref`, and this reads it from the URL in the browser. The page
+ * HTML can be cached and identical for everyone; `location.search` is not.
+ *
+ * Belt and braces, deliberately. Either layer alone is sufficient.
+ * ---------------------------------------------------------------------------
+ *
+ * @return void
+ */
+function ans_attr_fallback_script() {
+	if ( is_admin() ) {
+		return;
+	}
+
+	$map = array();
+
+	foreach ( ans_attr_campaigns() as $key => $campaign ) {
+		$map[ strtoupper( $campaign['coupon'] ) ] = $key;
+	}
+
+	if ( empty( $map ) ) {
+		return;
+	}
+
+	$json = wp_json_encode( $map );
+	$name = ANS_ATTR_COOKIE;
+	$ttl  = (int) ANS_ATTR_TTL;
+
+	?>
+<script id="ans-attr-fallback">
+(function () {
+	try {
+		var map = <?php echo $json; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>;
+		var params = new URLSearchParams(window.location.search);
+		var ref = (params.get('ansref') || '').toUpperCase();
+		if (!ref || !map[ref]) { return; }
+		if (document.cookie.indexOf('<?php echo esc_js( $name ); ?>=') !== -1) { return; }
+		var payload = JSON.stringify({
+			campaign: map[ref],
+			coupon: ref,
+			ts: Math.floor(Date.now() / 1000)
+		});
+		var expires = new Date(Date.now() + <?php echo (int) $ttl; ?> * 1000).toUTCString();
+		document.cookie = '<?php echo esc_js( $name ); ?>=' + encodeURIComponent(payload) +
+			';expires=' + expires + ';path=/;SameSite=Lax' +
+			(window.location.protocol === 'https:' ? ';Secure' : '');
+	} catch (e) { /* attribution is never worth breaking a page over */ }
+})();
+</script>
+	<?php
+}
+add_action( 'wp_footer', 'ans_attr_fallback_script', 99 );
