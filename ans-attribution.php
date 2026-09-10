@@ -3,7 +3,7 @@
  * Plugin Name: Ars Nova Attribution
  * Plugin URI:  https://github.com/ArsNovaSingers/ans-attribution
  * Description: Campaign attribution for print mailers. Captures a campaign ref off the landing URL, auto-applies that campaign's coupon, refuses to stack it on a Flex Pass / Season Package, and stamps every resulting order so the mailer's return is answerable years later without depending on GA4.
- * Version:     1.2.0
+ * Version:     1.3.0
  * Author:      Ars Nova (Jonathan Raabe) + Claude
  * Requires PHP: 7.4
  * Text Domain: ans-attribution
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ANS_ATTR_VERSION', '1.2.0' );
+define( 'ANS_ATTR_VERSION', '1.3.0' );
 define( 'ANS_ATTR_SCANS_OPTION', 'ans_attr_scans' );
 define( 'ANS_ATTR_COOKIE', 'ans_attr' );
 define( 'ANS_ATTR_TTL', 60 * DAY_IN_SECONDS );
@@ -434,6 +434,12 @@ function ans_attr_scan_count( $short_path, $campaign_key = '' ) {
  * @return WP_REST_Response
  */
 function ans_attr_report( $request ) {
+	// Measured on LIVE 2026-09-09: this response was being served from cache,
+	// so the report returned scans=1 while the database held 9. The counting
+	// was correct; the READOUT lied. A stale attribution report is worse than
+	// none — it is the number someone decides next year's print budget on.
+	nocache_headers();
+
 	$wanted    = sanitize_text_field( (string) $request->get_param( 'campaign' ) );
 	$campaigns = ans_attr_campaigns();
 
@@ -527,6 +533,7 @@ function ans_attr_rest_routes() {
 		array(
 			'methods'             => 'GET',
 			'callback'            => static function () {
+				nocache_headers();
 				return rest_ensure_response( ans_attr_campaigns() );
 			},
 			'permission_callback' => $can,
