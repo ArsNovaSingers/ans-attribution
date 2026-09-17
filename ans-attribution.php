@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Ars Nova Attribution
  * Plugin URI:  https://github.com/ArsNovaSingers/ans-attribution
- * Description: Campaign attribution for print mailers. Captures a campaign ref off the landing URL, auto-applies that campaign's coupon, refuses to stack it on a Flex Pass / Season Package, and stamps every resulting order so the mailer's return is answerable years later without depending on GA4.
- * Version:     1.3.0
+ * Description: Campaign attribution for print mailers and on-air radio. Captures a campaign ref off the landing URL, auto-applies that campaign's coupon, refuses to stack it on a Flex Pass / Season Package, and stamps every resulting order so the mailer's return is answerable years later without depending on GA4.
+ * Version:     1.4.0
  * Author:      Ars Nova (Jonathan Raabe) + Claude
  * Requires PHP: 7.4
  * Text Domain: ans-attribution
@@ -15,7 +15,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ANS_ATTR_VERSION', '1.3.0' );
+define( 'ANS_ATTR_VERSION', '1.4.0' );
+define( 'ANS_ATTR_OVERRIDES_OPTION', 'ans_attr_overrides' );
 define( 'ANS_ATTR_SCANS_OPTION', 'ans_attr_scans' );
 define( 'ANS_ATTR_COOKIE', 'ans_attr' );
 define( 'ANS_ATTR_TTL', 60 * DAY_IN_SECONDS );
@@ -45,9 +46,159 @@ function ans_attr_campaigns() {
 			'pieces'      => 650,
 			'mail_house'  => 'Allegra',
 		),
+		// CPR Classical (KVOD 88.1) on-air sponsorship, 2026-27 season. 180
+		// 15-second spots, 2026-09-28 to 2027-05-23. The announcer SAYS the
+		// URL, so it cannot carry a cache-busting query param. The spoken
+		// aliases below are plain 302s to short_path + qr_query; a cached
+		// alias is harmless because it records nothing. The counted hop is
+		// the second one, which always carries ?r=1 and so always BYPASSes
+		// Kinsta's edge cache (see ans_attr_handle_short_link).
+		//
+		// `coupon` here is a REF ONLY. There is deliberately no WooCommerce
+		// coupon behind it: noncommercial underwriting rules keep discounts
+		// off the air. auto-apply finds no coupon and does nothing; the
+		// order stamp still records the campaign.
+		//
+		// `destination` and `utm_content` move to the next concert each
+		// flight. Change them with POST attribution/campaign/cpr-kvod-2627,
+		// not by editing this file.
+		'cpr-kvod-2627' => array(
+			'label'        => 'CPR Classical (KVOD) on-air sponsorship 2026-27',
+			'coupon'       => 'CPRKVOD',
+			'short_path'   => '/go/cpr',
+			'qr_query'     => 'r=1',
+			'aliases'      => array( '/cpr', '/npr', '/kvod' ),
+			'destination'  => '/this-season/rivers-and-streams/',
+			'utm_source'   => 'cpr',
+			'utm_medium'   => 'radio',
+			'utm_campaign' => 'kvod-2627',
+			'utm_content'  => 'rivers-and-streams',
+			'spots'        => 180,
+			'channel'      => 'radio',
+		),
 	);
 
-	return (array) apply_filters( 'ans_attr_campaigns', $campaigns );
+	$campaigns = (array) apply_filters( 'ans_attr_campaigns', $campaigns );
+
+	return ans_attr_apply_overrides( $campaigns );
+}
+
+/**
+ * Fields that may be changed at runtime, without a plugin release.
+ *
+ * Only where a campaign POINTS, never what it counts or which code it carries —
+ * changing `coupon` or `short_path` at runtime would orphan the counters.
+ *
+ * @return string[]
+ */
+function ans_attr_overridable_fields() {
+	return array( 'destination', 'utm_content' );
+}
+
+/**
+ * Layer stored runtime overrides onto the code registry.
+ *
+ * @param array<string,array<string,mixed>> $campaigns Registry.
+ * @return array<string,array<string,mixed>>
+ */
+function ans_attr_apply_overrides( $campaigns ) {
+	$overrides = get_option( ANS_ATTR_OVERRIDES_OPTION, array() );
+
+	if ( ! is_array( $overrides ) ) {
+		return $campaigns;
+	}
+
+	foreach ( $overrides as $key => $fields ) {
+		if ( ! isset( $campaigns[ $key ] ) || ! is_array( $fields ) ) {
+			continue;
+		}
+
+		foreach ( ans_attr_overridable_fields() as $field ) {
+			if ( isset( $fields[ $field ] ) && '' !== $fields[ $field ] ) {
+				$campaigns[ $key ][ $field ] = $fields[ $field ];
+			}
+		}
+	}
+
+	return $campaigns;
+}
+
+/**
+ * REST: re-point a campaign (destination / utm_content).
+ *
+ * Every change is appended to a history list on the override itself, so the
+ * report can later say which concert a given week's traffic was sent to.
+ *
+ * @param WP_REST_Request $request Request.
+ * @return WP_REST_Response|WP_Error
+ */
+function ans_attr_update_campaign( $request ) {
+	nocache_headers();
+
+	$key       = sanitize_key( (string) $request['key'] );
+	$campaigns = ans_attr_campaigns();
+
+	if ( ! isset( $campaigns[ $key ] ) ) {
+		return new WP_Error( 'ans_attr_unknown_campaign', 'No such campaign.', array( 'status' => 404 ) );
+	}
+
+	$overrides = get_option( ANS_ATTR_OVERRIDES_OPTION, array() );
+
+	if ( ! is_array( $overrides ) ) {
+		$overrides = array();
+	}
+
+	$current = isset( $overrides[ $key ] ) && is_array( $overrides[ $key ] ) ? $overrides[ $key ] : array();
+	$changed = array();
+
+	$destination = $request->get_param( 'destination' );
+
+	if ( null !== $destination ) {
+		$destination = '/' . ltrim( (string) wp_parse_url( esc_url_raw( home_url( (string) $destination ) ), PHP_URL_PATH ), '/' );
+
+		if ( '/' === $destination ) {
+			return new WP_Error( 'ans_attr_bad_destination', 'destination must be a site path such as /this-season/darkness-and-light/.', array( 'status' => 400 ) );
+		}
+
+		$current['destination'] = trailingslashit( $destination );
+		$changed['destination'] = $current['destination'];
+	}
+
+	$content = $request->get_param( 'utm_content' );
+
+	if ( null !== $content ) {
+		$content = sanitize_title( (string) $content );
+
+		if ( '' === $content ) {
+			return new WP_Error( 'ans_attr_bad_content', 'utm_content must not be empty.', array( 'status' => 400 ) );
+		}
+
+		$current['utm_content'] = $content;
+		$changed['utm_content'] = $content;
+	}
+
+	if ( empty( $changed ) ) {
+		return new WP_Error( 'ans_attr_nothing_to_change', 'Pass destination and/or utm_content.', array( 'status' => 400 ) );
+	}
+
+	$history   = isset( $current['history'] ) && is_array( $current['history'] ) ? $current['history'] : array();
+	$history[] = array_merge( array( 'at' => gmdate( 'c' ) ), $changed );
+
+	$current['history'] = array_slice( $history, -50 );
+	$overrides[ $key ]  = $current;
+
+	update_option( ANS_ATTR_OVERRIDES_OPTION, $overrides, false );
+
+	$campaigns = ans_attr_campaigns();
+
+	return rest_ensure_response(
+		array(
+			'campaign'    => $key,
+			'destination' => $campaigns[ $key ]['destination'],
+			'utm_content' => $campaigns[ $key ]['utm_content'],
+			'history'     => $current['history'],
+		)
+	);
 }
 
 /**
@@ -114,7 +265,9 @@ function ans_attr_capture() {
 		return;
 	}
 
-	ans_attr_set_cookie( $campaign['key'], $campaign['coupon'] );
+	$content = isset( $_GET['utm_content'] ) ? sanitize_title( wp_unslash( $_GET['utm_content'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+
+	ans_attr_set_cookie( $campaign['key'], $campaign['coupon'], $content );
 }
 add_action( 'init', 'ans_attr_capture', 5 );
 
@@ -123,16 +276,21 @@ add_action( 'init', 'ans_attr_capture', 5 );
  *
  * @param string $campaign_key Campaign key.
  * @param string $coupon       Coupon code.
+ * @param string $content      utm_content the visitor was sent to, if known.
  * @return void
  */
-function ans_attr_set_cookie( $campaign_key, $coupon ) {
-	$payload = wp_json_encode(
-		array(
-			'campaign' => $campaign_key,
-			'coupon'   => $coupon,
-			'ts'       => time(),
-		)
+function ans_attr_set_cookie( $campaign_key, $coupon, $content = '' ) {
+	$data = array(
+		'campaign' => $campaign_key,
+		'coupon'   => $coupon,
+		'ts'       => time(),
 	);
+
+	if ( '' !== (string) $content ) {
+		$data['content'] = sanitize_title( (string) $content );
+	}
+
+	$payload = wp_json_encode( $data );
 
 	if ( ! headers_sent() ) {
 		setcookie(
@@ -384,6 +542,13 @@ function ans_attr_stamp_order( $order ) {
 	$order->update_meta_data( '_ans_campaign', sanitize_text_field( $stored['campaign'] ) );
 	$order->update_meta_data( '_ans_ref', sanitize_text_field( $stored['coupon'] ) );
 	$order->update_meta_data( '_ans_landed', gmdate( 'c', (int) $stored['ts'] ) );
+
+	// Which concert the visitor was sent to. For a season-long campaign whose
+	// destination moves each flight, this is the only per-concert breakdown
+	// that survives GA4 retention.
+	if ( ! empty( $stored['content'] ) ) {
+		$order->update_meta_data( '_ans_content', sanitize_title( $stored['content'] ) );
+	}
 }
 add_action( 'woocommerce_checkout_create_order', 'ans_attr_stamp_order', 20, 1 );
 add_action( 'woocommerce_store_api_checkout_update_order_from_request', 'ans_attr_stamp_order', 20, 1 );
@@ -460,8 +625,9 @@ function ans_attr_report( $request ) {
 			$redemptions = (int) $coupon->get_usage_count();
 		}
 
-		$orders  = array();
-		$revenue = 0.0;
+		$orders     = array();
+		$revenue    = 0.0;
+		$by_content = array();
 
 		if ( function_exists( 'wc_get_orders' ) ) {
 			$orders = wc_get_orders(
@@ -476,13 +642,23 @@ function ans_attr_report( $request ) {
 
 			foreach ( $orders as $order ) {
 				$revenue += (float) $order->get_total();
+
+				$content = (string) $order->get_meta( '_ans_content' );
+				$content = '' === $content ? '(unknown)' : $content;
+
+				if ( ! isset( $by_content[ $content ] ) ) {
+					$by_content[ $content ] = array( 'orders' => 0, 'revenue' => 0.0 );
+				}
+
+				$by_content[ $content ]['orders']++;
+				$by_content[ $content ]['revenue'] = round( $by_content[ $content ]['revenue'] + (float) $order->get_total(), 2 );
 			}
 		}
 
 		$pieces = isset( $campaign['pieces'] ) ? (int) $campaign['pieces'] : 0;
 		$scans  = ans_attr_scan_count( $campaign['short_path'], $key );
 
-		$out[ $key ] = array(
+		$row = array(
 			'label'              => $campaign['label'],
 			'coupon'             => $campaign['coupon'],
 			'short_path'         => $campaign['short_path'],
@@ -493,8 +669,26 @@ function ans_attr_report( $request ) {
 			'coupon_redemptions' => $redemptions,
 			'attributed_orders'  => count( $orders ),
 			'attributed_revenue' => round( $revenue, 2 ),
+			'orders_by_content'  => $by_content,
 			'note'               => 'scans = server-side redirect hits. attributed_* = orders carrying _ans_campaign, independent of GA4.',
 		);
+
+		if ( ! empty( $campaign['aliases'] ) ) {
+			$row['spoken_urls'] = array_map(
+				static function ( $alias ) {
+					return home_url( $alias );
+				},
+				(array) $campaign['aliases']
+			);
+		}
+
+		if ( isset( $campaign['spots'] ) ) {
+			$row['spots']       = (int) $campaign['spots'];
+			$row['destination'] = $campaign['destination'];
+			$row['utm_content'] = $campaign['utm_content'];
+		}
+
+		$out[ $key ] = $row;
 	}
 
 	return rest_ensure_response( $out );
@@ -537,6 +731,20 @@ function ans_attr_rest_routes() {
 				return rest_ensure_response( ans_attr_campaigns() );
 			},
 			'permission_callback' => $can,
+		)
+	);
+
+	register_rest_route(
+		'ans-ops/v1',
+		'/attribution/campaign/(?P<key>[a-z0-9_-]+)',
+		array(
+			'methods'             => 'POST',
+			'callback'            => 'ans_attr_update_campaign',
+			'permission_callback' => $can,
+			'args'                => array(
+				'destination' => array( 'type' => 'string' ),
+				'utm_content' => array( 'type' => 'string' ),
+			),
 		)
 	);
 }
@@ -585,17 +793,32 @@ function ans_attr_handle_short_link() {
 			continue;
 		}
 
-		if ( $path !== '/' . trim( $campaign['short_path'], '/' ) ) {
+		$short = '/' . trim( $campaign['short_path'], '/' );
+
+		// A spoken alias (/cpr) cannot carry a cache-busting param, so it is
+		// a plain hop onto the counted short path WITH one. It records
+		// nothing itself, so an edge-cached copy of this 302 loses nothing.
+		if ( $path !== $short && ! empty( $campaign['aliases'] ) ) {
+			foreach ( (array) $campaign['aliases'] as $alias ) {
+				if ( $path === '/' . trim( (string) $alias, '/' ) ) {
+					$target = home_url( $short ) . ( empty( $campaign['qr_query'] ) ? '' : '?' . $campaign['qr_query'] );
+					wp_safe_redirect( $target, 302 );
+					exit;
+				}
+			}
+		}
+
+		if ( $path !== $short ) {
 			continue;
 		}
 
 		ans_attr_record_scan( $key );
-		ans_attr_set_cookie( $key, $campaign['coupon'] );
+		ans_attr_set_cookie( $key, $campaign['coupon'], $campaign['utm_content'] );
 
 		$destination = add_query_arg(
 			array(
-				'utm_source'   => 'qr',
-				'utm_medium'   => 'print',
+				'utm_source'   => isset( $campaign['utm_source'] ) ? $campaign['utm_source'] : 'qr',
+				'utm_medium'   => isset( $campaign['utm_medium'] ) ? $campaign['utm_medium'] : 'print',
 				'utm_campaign' => isset( $campaign['utm_campaign'] ) ? $campaign['utm_campaign'] : 'confluence-2627',
 				'utm_content'  => $campaign['utm_content'],
 				'ansref'       => $campaign['coupon'],
@@ -677,11 +900,14 @@ function ans_attr_fallback_script() {
 		var ref = (params.get('ansref') || '').toUpperCase();
 		if (!ref || !map[ref]) { return; }
 		if (document.cookie.indexOf('<?php echo esc_js( $name ); ?>=') !== -1) { return; }
-		var payload = JSON.stringify({
+		var data = {
 			campaign: map[ref],
 			coupon: ref,
 			ts: Math.floor(Date.now() / 1000)
-		});
+		};
+		var content = params.get('utm_content');
+		if (content) { data.content = content.toLowerCase().replace(/[^a-z0-9_-]/g, ''); }
+		var payload = JSON.stringify(data);
 		var expires = new Date(Date.now() + <?php echo (int) $ttl; ?> * 1000).toUTCString();
 		document.cookie = '<?php echo esc_js( $name ); ?>=' + encodeURIComponent(payload) +
 			';expires=' + expires + ';path=/;SameSite=Lax' +

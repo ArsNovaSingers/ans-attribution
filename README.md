@@ -1,6 +1,6 @@
 # Ars Nova Attribution
 
-Answers one question: **was the mailer worth printing?**
+Answers one question: **was the mailer (or the radio spot) worth paying for?**
 
 Three independent counters, so no single dependency can lose the answer:
 
@@ -45,3 +45,26 @@ Registered in `ans-ops/v1`, so the Ars Nova WordPress MCP connector reaches it v
 Add an entry to `ans_attr_campaigns()` (or filter it), create the coupon restricted to
 that concert's products, and add the `/go/<slug>` redirect. One code per piece — a
 season-wide code cannot tell you which card worked.
+
+## Radio campaigns (v1.4.0)
+
+An announcer says the URL, so it cannot carry the `?m=1` cache-buster a printed QR does.
+A campaign can therefore list **spoken `aliases`** (`/cpr`, `/npr`, `/kvod`). An alias is a
+plain 302 to `short_path?qr_query`; it records nothing, so a copy cached at Kinsta's edge
+loses nothing. The counted hop is always the second one, which always carries the param.
+
+Per-campaign `utm_source` / `utm_medium` replace the old hard-coded `qr` / `print`.
+
+A radio campaign runs all season but promotes a different concert each flight. Re-point it
+without a release:
+
+    POST ans-ops/v1/attribution/campaign/cpr-kvod-2627
+    { "destination": "/this-season/darkness-and-light/", "utm_content": "darkness-and-light" }
+
+Only `destination` and `utm_content` can change at runtime; every change is kept in a
+history list. The visitor's `utm_content` is stored in the cookie and stamped on the order
+as `_ans_content`, and the report breaks attributed orders down by it
+(`orders_by_content`).
+
+`CPRKVOD` is a ref, not a coupon. Noncommercial underwriting rules keep discounts off
+the air, so there is deliberately no WooCommerce coupon behind it.
