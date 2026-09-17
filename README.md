@@ -68,3 +68,13 @@ as `_ans_content`, and the report breaks attributed orders down by it
 
 `CPRKVOD` is a ref, not a coupon. Noncommercial underwriting rules keep discounts off
 the air, so there is deliberately no WooCommerce coupon behind it.
+
+## Correcting a counter (v1.4.1)
+
+Testing a live short link counts as a scan. Take test hits back out with
+
+    POST ans-ops/v1/attribution/scans/<campaign>   { "adjust": -1, "reason": "test request" }
+    POST ans-ops/v1/attribution/scans/<campaign>   { "set": 0, "reason": "reset before drop" }
+
+Every correction is logged (`ans_attr_scan_corrections`). Short-link and alias matching is
+case-insensitive from v1.4.1, because an announcer spelling "slash C-P-R" gets `/CPR` typed.
