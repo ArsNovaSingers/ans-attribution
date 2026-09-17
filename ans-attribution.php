@@ -3,7 +3,7 @@
  * Plugin Name: Ars Nova Attribution
  * Plugin URI:  https://github.com/ArsNovaSingers/ans-attribution
  * Description: Campaign attribution for print mailers and on-air radio. Captures a campaign ref off the landing URL, auto-applies that campaign's coupon, refuses to stack it on a Flex Pass / Season Package, and stamps every resulting order so the mailer's return is answerable years later without depending on GA4.
- * Version:     1.4.0
+ * Version:     1.4.1
  * Author:      Ars Nova (Jonathan Raabe) + Claude
  * Requires PHP: 7.4
  * Text Domain: ans-attribution
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ANS_ATTR_VERSION', '1.4.0' );
+define( 'ANS_ATTR_VERSION', '1.4.1' );
 define( 'ANS_ATTR_OVERRIDES_OPTION', 'ans_attr_overrides' );
 define( 'ANS_ATTR_SCANS_OPTION', 'ans_attr_scans' );
 define( 'ANS_ATTR_COOKIE', 'ans_attr' );
@@ -736,6 +736,21 @@ function ans_attr_rest_routes() {
 
 	register_rest_route(
 		'ans-ops/v1',
+		'/attribution/scans/(?P<key>[a-z0-9_-]+)',
+		array(
+			'methods'             => 'POST',
+			'callback'            => 'ans_attr_set_scans',
+			'permission_callback' => $can,
+			'args'                => array(
+				'set'    => array( 'type' => 'integer' ),
+				'adjust' => array( 'type' => 'integer' ),
+				'reason' => array( 'type' => 'string' ),
+			),
+		)
+	);
+
+	register_rest_route(
+		'ans-ops/v1',
 		'/attribution/campaign/(?P<key>[a-z0-9_-]+)',
 		array(
 			'methods'             => 'POST',
@@ -786,21 +801,23 @@ function ans_attr_handle_short_link() {
 		return;
 	}
 
-	$path = '/' . trim( (string) strtok( $uri, '?' ), '/' );
+	// Case-insensitive: the announcer spells the path out ("slash C-P-R"),
+	// so listeners type /CPR as often as /cpr.
+	$path = strtolower( '/' . trim( rawurldecode( (string) strtok( $uri, '?' ) ), '/' ) );
 
 	foreach ( ans_attr_campaigns() as $key => $campaign ) {
 		if ( empty( $campaign['short_path'] ) || empty( $campaign['destination'] ) ) {
 			continue;
 		}
 
-		$short = '/' . trim( $campaign['short_path'], '/' );
+		$short = strtolower( '/' . trim( $campaign['short_path'], '/' ) );
 
 		// A spoken alias (/cpr) cannot carry a cache-busting param, so it is
 		// a plain hop onto the counted short path WITH one. It records
 		// nothing itself, so an edge-cached copy of this 302 loses nothing.
 		if ( $path !== $short && ! empty( $campaign['aliases'] ) ) {
 			foreach ( (array) $campaign['aliases'] as $alias ) {
-				if ( $path === '/' . trim( (string) $alias, '/' ) ) {
+				if ( $path === strtolower( '/' . trim( (string) $alias, '/' ) ) ) {
 					$target = home_url( $short ) . ( empty( $campaign['qr_query'] ) ? '' : '?' . $campaign['qr_query'] );
 					wp_safe_redirect( $target, 302 );
 					exit;
@@ -832,6 +849,62 @@ function ans_attr_handle_short_link() {
 	}
 }
 add_action( 'init', 'ans_attr_handle_short_link', 1 );
+
+/**
+ * REST: correct a campaign's scan counter.
+ *
+ * Testing a live short link counts as a scan. Before v1.4.1 the only way to
+ * take a test hit back out was SSH into the database, so the counter a mailer
+ * or radio budget is judged on quietly carried the tester's clicks. `set`
+ * writes an exact value (e.g. 0 before a drop); `adjust` adds or subtracts
+ * (e.g. -1 for one test request). Every correction is logged with its reason.
+ *
+ * @param WP_REST_Request $request Request.
+ * @return WP_REST_Response|WP_Error
+ */
+function ans_attr_set_scans( $request ) {
+	nocache_headers();
+
+	$key = sanitize_key( (string) $request['key'] );
+
+	if ( ! isset( ans_attr_campaigns()[ $key ] ) ) {
+		return new WP_Error( 'ans_attr_unknown_campaign', 'No such campaign.', array( 'status' => 404 ) );
+	}
+
+	$set    = $request->get_param( 'set' );
+	$adjust = $request->get_param( 'adjust' );
+
+	if ( null === $set && null === $adjust ) {
+		return new WP_Error( 'ans_attr_nothing_to_change', 'Pass set or adjust.', array( 'status' => 400 ) );
+	}
+
+	$counts = get_option( ANS_ATTR_SCANS_OPTION, array() );
+
+	if ( ! is_array( $counts ) ) {
+		$counts = array();
+	}
+
+	$before = isset( $counts[ $key ] ) ? (int) $counts[ $key ] : 0;
+	$after  = null !== $set ? (int) $set : $before + (int) $adjust;
+	$after  = max( 0, $after );
+
+	$counts[ $key ] = $after;
+	update_option( ANS_ATTR_SCANS_OPTION, $counts, false );
+
+	$log   = get_option( 'ans_attr_scan_corrections', array() );
+	$log   = is_array( $log ) ? $log : array();
+	$log[] = array(
+		'at'       => gmdate( 'c' ),
+		'campaign' => $key,
+		'before'   => $before,
+		'after'    => $after,
+		'reason'   => sanitize_text_field( (string) $request->get_param( 'reason' ) ),
+		'user'     => get_current_user_id(),
+	);
+	update_option( 'ans_attr_scan_corrections', array_slice( $log, -100 ), false );
+
+	return rest_ensure_response( array( 'campaign' => $key, 'before' => $before, 'after' => $after ) );
+}
 
 /**
  * Increment the scan counter for a campaign.
