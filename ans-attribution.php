@@ -3,7 +3,7 @@
  * Plugin Name: Ars Nova Attribution
  * Plugin URI:  https://github.com/ArsNovaSingers/ans-attribution
  * Description: Campaign attribution for print mailers and on-air radio. Captures a campaign ref off the landing URL, auto-applies that campaign's coupon, refuses to stack it on a Flex Pass / Season Package, and stamps every resulting order so the mailer's return is answerable years later without depending on GA4.
- * Version:     1.4.1
+ * Version:     1.5.0
  * Author:      Ars Nova (Jonathan Raabe) + Claude
  * Requires PHP: 7.4
  * Text Domain: ans-attribution
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ANS_ATTR_VERSION', '1.4.1' );
+define( 'ANS_ATTR_VERSION', '1.5.0' );
 define( 'ANS_ATTR_OVERRIDES_OPTION', 'ans_attr_overrides' );
 define( 'ANS_ATTR_SCANS_OPTION', 'ans_attr_scans' );
 define( 'ANS_ATTR_COOKIE', 'ans_attr' );
@@ -75,6 +75,29 @@ function ans_attr_campaigns() {
 			'utm_content'  => 'rivers-and-streams',
 			'spots'        => 180,
 			'channel'      => 'radio',
+		),
+		// Rivers & Streams venue poster (Oct 2026). Printed in-house and hung
+		// at the three performance venues. TRACKING ONLY: `coupon` is a REF,
+		// exactly as for cpr-kvod-2627 — there is no WooCommerce coupon behind
+		// RSPOSTER and the poster advertises no discount. auto-apply finds
+		// nothing and does nothing; the order stamp still records the campaign,
+		// so a ticket bought after a poster scan is attributable for 60 days.
+		//
+		// The printed QR carries ?p=1 for the same reason /go/rs carries ?m=1:
+		// a bare /go/rsp is served from Kinsta's edge with Set-Cookie stripped,
+		// and utm_* params do NOT bust that cache. The query param is what
+		// forces BYPASS so the hop is counted and the cookie is set.
+		'rivers-streams-poster-2026' => array(
+			'label'        => 'Rivers & Streams venue poster (Oct 2026)',
+			'coupon'       => 'RSPOSTER',
+			'short_path'   => '/go/rsp',
+			'qr_query'     => 'p=1',
+			'destination'  => '/this-season/rivers-and-streams/',
+			'utm_source'   => 'poster',
+			'utm_medium'   => 'print',
+			'utm_campaign' => 'confluence-2627',
+			'utm_content'  => 'rivers-streams-poster-2026',
+			'channel'      => 'print',
 		),
 	);
 
