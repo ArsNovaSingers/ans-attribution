@@ -2,8 +2,8 @@
 /**
  * Plugin Name: Ars Nova Attribution
  * Plugin URI:  https://github.com/ArsNovaSingers/ans-attribution
- * Description: Campaign attribution for print mailers and on-air radio. Captures a campaign ref off the landing URL, auto-applies that campaign's coupon, refuses to stack it on a Flex Pass / Season Package, and stamps every resulting order so the mailer's return is answerable years later without depending on GA4.
- * Version:     1.5.0
+ * Description: Campaign attribution for print mailers and on-air radio. Captures a campaign ref off the landing URL, auto-applies that campaign's coupon, refuses to stack it on a Flex Pass / Season Package, and stamps every resulting order so the mailer's return is answerable years later without depending on GA4. Also carries the Nextdoor ads pixel (PAGE_VIEW, ADD_TO_CART, PURCHASE).
+ * Version:     1.6.0
  * Author:      Ars Nova (Jonathan Raabe) + Claude
  * Requires PHP: 7.4
  * Text Domain: ans-attribution
@@ -15,11 +15,15 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'ANS_ATTR_VERSION', '1.5.0' );
+define( 'ANS_ATTR_VERSION', '1.6.0' );
 define( 'ANS_ATTR_OVERRIDES_OPTION', 'ans_attr_overrides' );
 define( 'ANS_ATTR_SCANS_OPTION', 'ans_attr_scans' );
 define( 'ANS_ATTR_COOKIE', 'ans_attr' );
 define( 'ANS_ATTR_TTL', 60 * DAY_IN_SECONDS );
+
+// Nextdoor ads pixel (v1.6.0). Ad-platform conversion tracking belongs with the
+// rest of campaign attribution, not in a WPCode snippet nobody can version.
+require_once __DIR__ . '/includes/nextdoor-pixel.php';
 
 /**
  * The campaign registry.

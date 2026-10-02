@@ -78,3 +78,26 @@ Testing a live short link counts as a scan. Take test hits back out with
 
 Every correction is logged (`ans_attr_scan_corrections`). Short-link and alias matching is
 case-insensitive from v1.4.1, because an announcer spelling "slash C-P-R" gets `/CPR` typed.
+
+## Nextdoor pixel (v1.6.0)
+
+`includes/nextdoor-pixel.php` carries the Nextdoor Universal Pixel for Nextdoor ads.
+
+| Event | Where it fires |
+|---|---|
+| `PAGE_VIEW` | Every front-end page, from Nextdoor's official base code in `<head>` (plus the `<noscript>` image). |
+| `ADD_TO_CART` | The first full page after a ticket is added to the cart. A WC session flag set on `woocommerce_add_to_cart` covers form posts, AJAX and the Store API alike. |
+| `PURCHASE` | The order-received page, only when the URL's order key matches. Sends `order_id`, `order_value`, `currency` and `event_id` (`ans-order-<id>`). Fires once per order: `_ans_nd_purchase_sent` order meta stops a reload counting the sale twice. Skipped for failed / cancelled / refunded orders. |
+
+No advanced matching: no name, email, phone or address is ever passed to `ndp()`.
+
+Output is skipped in wp-admin, AJAX, REST, cron, feeds, embeds and the Customizer
+preview. Logged-in users, administrators included, DO get the pixel, so Nextdoor's
+Pixel Helper can verify the install from a real browser session. To change that:
+
+    add_filter( 'ans_attr_nextdoor_enabled', fn() => ! current_user_can( 'manage_options' ) );
+
+The Data Source ID defaults to `ANS_ATTR_NEXTDOOR_PIXEL_ID` and is filterable, so a new
+pixel needs no release. An empty (or non-UUID) value disables all output:
+
+    add_filter( 'ans_attr_nextdoor_pixel_id', fn() => '' );
